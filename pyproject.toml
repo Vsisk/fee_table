@@ -1,0 +1,21 @@
+[project]
+name = "fee-table"
+version = "0.1.0"
+description = "Fee table logic area parsing framework"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "e2e: real network end-to-end tests that require RUN_LLM_E2E=1 and LLM credentials",
+]
