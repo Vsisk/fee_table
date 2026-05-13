@@ -1,99 +1,396 @@
-from typing import Any
+from __future__ import annotations
 
-from openai import AuthenticationError, BadRequestError, OpenAI
+import json
+from collections.abc import AsyncIterator, Awaitable, Mapping
+from pathlib import Path
+from typing import Any, Literal, overload
 
-from agent.llm.config import OpenAISettings, load_openai_settings
+try:
+    from openai import AsyncOpenAI
+    _OPENAI_SDK_AVAILABLE = True
+except ModuleNotFoundError:
+    AsyncOpenAI = Any  # type: ignore[assignment]
+    _OPENAI_SDK_AVAILABLE = False
 
-class LLMClient:
-    def __init__(self, settings: OpenAISettings | None = None):
-        self.settings = settings or load_openai_settings()
-        self._client: OpenAI | None = None
+from agent.llm.exceptions import (
+    LLMEmptyResponseError,
+    LLMJsonDecodeError,
+    LLMRequestError,
+)
+from agent.llm.jsonl_parser import IncrementalJsonlParser
+from agent.llm.prompt_manager import PromptManager
+from agent.llm.types import LLMFinalResponse, StreamJsonlObject
 
-    @property
-    def is_usable(self) -> bool:
-        return self.settings.is_usable
 
-    def complete(
+class OpenAILLMClient:
+    """Unified business-facing LLM client with one entrypoint."""
+
+    RESERVED_FIELDS = frozenset(
+        {
+            "prompt_template",
+            "lang",
+            "model",
+            "temperature",
+            "max_tokens",
+            "timeout",
+            "response_format",
+            "stream",
+            "strict",
+        }
+    )
+
+    def __init__(
         self,
         *,
-        prompt: str,
-        model: str,
-        llm_name: str = "base",
-        image_url: str | None = None,
-        response_format=None,
-    ) -> str:
-        if not self.is_usable:
-            raise RuntimeError(
-                "OpenAI settings are not usable. Check ENABLE_LLM and OPENAI_API_KEY in .env "
-                "or environment variables."
+        client: AsyncOpenAI | None = None,
+        prompt_manager: PromptManager | None = None,
+        prompt_file: str | Path | None = None,
+        default_model: str = "gpt-4.1",
+        default_lang: str = "zh",
+        default_temperature: float = 0,
+    ) -> None:
+        if client is None and not _OPENAI_SDK_AVAILABLE:
+            raise ModuleNotFoundError(
+                "openai package is required to instantiate OpenAILLMClient. "
+                "Install it with `pip install openai`."
             )
-
-        user_content: str | list[dict[str, Any]]
-        if llm_name == "vl":
-            if not image_url:
-                raise ValueError("image_url is required for vl payload")
-            user_content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
-            ]
-        elif llm_name == "base":
-            user_content = prompt
-        else:
-            raise ValueError(f"Unsupported llm_name: {llm_name}")
-
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a strict machine-readable API. Return only the requested format.",
-            },
-            {
-                "role": "user",
-                "content": user_content,
-            },
-        ]
-        try:
-            request: dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0,
-            }
-            if response_format is not None:
-                request["response_format"] = response_format
-            response = self._get_client().chat.completions.create(**request)
-        except AuthenticationError as exc:
-            key_len = len(self.settings.api_key.strip())
-            has_base_url = bool(self.settings.base_url)
-            raise RuntimeError(
-                "LLM authentication failed. The request was sent with "
-                f"OPENAI_API_KEY length={key_len}, OPENAI_BASE_URL set={has_base_url}, "
-                f"model={model!r}. Verify the key is valid for the configured base URL. "
-                "For DashScope compatible mode, OPENAI_BASE_URL should usually be "
-                "'https://dashscope.aliyuncs.com/compatible-mode/v1'."
-            ) from exc
-        except (TypeError, BadRequestError):
-            response = self._get_client().chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-            )
-        content = response.choices[0].message.content or "{}"
-        return content
-
-    def complete_json(self, prompt: str) -> dict[str, Any]:
-        from agent.llm.llm_post_processor import parse_json_response
-
-        content = self.complete(
-            prompt=prompt,
-            model=self.settings.model_for("base"),
-            llm_name="base",
+        self._client = client or AsyncOpenAI()
+        self._prompt_manager = prompt_manager or PromptManager(
+            prompt_file=prompt_file,
+            default_lang=default_lang,
         )
-        return parse_json_response(content)
+        self._default_model = default_model
+        self._default_lang = default_lang
+        self._default_temperature = default_temperature
 
-    def _get_client(self) -> OpenAI:
-        if self._client is None:
-            self._client = OpenAI(
-                api_key=self.settings.api_key,
-                base_url=self.settings.base_url,
-                timeout=self.settings.timeout_seconds,
+    @classmethod
+    def split_request_arguments(
+        cls,
+        request_arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Split reserved generate_result_by_llm fields from prompt variables."""
+
+        reserved_arguments: dict[str, Any] = {}
+        prompt_variables: dict[str, Any] = {}
+        for key, value in request_arguments.items():
+            if key in cls.RESERVED_FIELDS:
+                reserved_arguments[key] = value
+            else:
+                prompt_variables[key] = value
+        return reserved_arguments, prompt_variables
+
+    @overload
+    def generate_result_by_llm(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str = "zh",
+        response_format: dict[str, Any] | None = None,
+        stream: Literal[False] = False,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> Awaitable[LLMFinalResponse]: ...
+
+    @overload
+    def generate_result_by_llm(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str = "zh",
+        response_format: dict[str, Any] | None = None,
+        stream: Literal[True],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamJsonlObject]: ...
+
+    def generate_result_by_llm(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str = "zh",
+        response_format: dict[str, Any] | None = None,
+        stream: bool = False,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> Awaitable[LLMFinalResponse] | AsyncIterator[StreamJsonlObject]:
+        request_arguments = {
+            "prompt_template": prompt_template,
+            "lang": lang,
+            "response_format": response_format,
+            "stream": stream,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+            "strict": strict,
+            **kwargs,
+        }
+        _, prompt_variables = self.split_request_arguments(request_arguments)
+
+        if stream:
+            return self._generate_stream(
+                prompt_template=prompt_template,
+                lang=lang,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                strict=strict,
+                response_format=response_format,
+                prompt_variables=prompt_variables,
             )
-        return self._client
+
+        return self._generate_final(
+            prompt_template=prompt_template,
+            lang=lang,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            strict=strict,
+            response_format=response_format,
+            prompt_variables=prompt_variables,
+        )
+
+    async def _generate_final(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str,
+        model: str | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        timeout: float | None,
+        strict: bool,
+        response_format: dict[str, Any] | None,
+        prompt_variables: Mapping[str, Any],
+    ) -> LLMFinalResponse:
+        prompt_text = self._render_prompt(
+            prompt_template=prompt_template,
+            lang=lang,
+            strict=strict,
+            prompt_variables=prompt_variables,
+        )
+        messages = self._build_messages(prompt_text)
+        payload = self._build_chat_payload(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            response_format=response_format,
+            messages=messages,
+            stream=False,
+        )
+
+        try:
+            response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            raise LLMRequestError(f"OpenAI request failed: {exc}") from exc
+
+        raw_text = self._extract_message_text(response)
+        if not raw_text.strip():
+            raise LLMEmptyResponseError("LLM returned an empty response.")
+
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise LLMJsonDecodeError(
+                f"Failed to decode final JSON response: {exc.msg}"
+            ) from exc
+
+        return LLMFinalResponse(
+            parsed=parsed,
+            raw_text=raw_text,
+            prompt_text=prompt_text,
+            model=getattr(response, "model", None),
+            usage=self._normalize_usage(getattr(response, "usage", None)),
+        )
+
+    async def _generate_stream(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str,
+        model: str | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        timeout: float | None,
+        strict: bool,
+        response_format: dict[str, Any] | None,
+        prompt_variables: Mapping[str, Any],
+    ) -> AsyncIterator[StreamJsonlObject]:
+        prompt_text = self._render_prompt(
+            prompt_template=prompt_template,
+            lang=lang,
+            strict=strict,
+            prompt_variables=prompt_variables,
+        )
+        messages = self._build_messages(prompt_text)
+        payload = self._build_chat_payload(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            response_format=response_format,
+            messages=messages,
+            stream=True,
+        )
+        parser = IncrementalJsonlParser()
+        index = 0
+
+        try:
+            stream_response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            raise LLMRequestError(f"OpenAI stream request failed: {exc}") from exc
+
+        async for chunk in stream_response:
+            delta_text = self._extract_stream_delta_text(chunk)
+            if not delta_text:
+                continue
+
+            for event in parser.feed(delta_text):
+                yield StreamJsonlObject(
+                    object=event.parsed,
+                    raw_line=event.raw_line,
+                    index=index,
+                )
+                index += 1
+
+        for event in parser.flush():
+            yield StreamJsonlObject(
+                object=event.parsed,
+                raw_line=event.raw_line,
+                index=index,
+            )
+            index += 1
+
+    def _render_prompt(
+        self,
+        *,
+        prompt_template: list[str],
+        lang: str,
+        strict: bool,
+        prompt_variables: Mapping[str, Any],
+    ) -> str:
+        return self._prompt_manager.render(
+            prompt_template=prompt_template,
+            lang=lang or self._default_lang,
+            variables=prompt_variables,
+            strict=strict,
+        ).prompt_text
+
+    @staticmethod
+    def _build_messages(prompt_text: str) -> list[dict[str, str]]:
+        return [{"role": "user", "content": prompt_text}]
+
+    def _build_chat_payload(
+        self,
+        *,
+        model: str | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        timeout: float | None,
+        response_format: dict[str, Any] | None,
+        messages: list[dict[str, str]],
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model or self._default_model,
+            "messages": messages,
+            "stream": stream,
+        }
+        resolved_temperature = (
+            self._default_temperature if temperature is None else temperature
+        )
+        payload["temperature"] = resolved_temperature
+
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if timeout is not None:
+            payload["timeout"] = timeout
+        if response_format is not None:
+            payload["response_format"] = response_format
+        return payload
+
+    @staticmethod
+    def _extract_message_text(response: Any) -> str:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            return ""
+
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            return ""
+
+        content = getattr(message, "content", None)
+        return OpenAILLMClient._extract_content_text(content)
+
+    @staticmethod
+    def _extract_stream_delta_text(chunk: Any) -> str:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            return ""
+
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            return ""
+
+        content = getattr(delta, "content", None)
+        return OpenAILLMClient._extract_content_text(content)
+
+    @staticmethod
+    def _extract_content_text(content: Any) -> str:
+        if content is None:
+            return ""
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    part_text = part.get("text")
+                    if isinstance(part_text, str):
+                        parts.append(part_text)
+                    elif isinstance(part_text, dict):
+                        value = part_text.get("value")
+                        if value is not None:
+                            parts.append(str(value))
+                    continue
+
+                maybe_text = getattr(part, "text", None)
+                if isinstance(maybe_text, str):
+                    parts.append(maybe_text)
+                    continue
+
+                maybe_value = getattr(maybe_text, "value", None)
+                if maybe_value is not None:
+                    parts.append(str(maybe_value))
+            return "".join(parts)
+
+        return str(content)
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> dict[str, Any] | None:
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            return usage
+        if hasattr(usage, "model_dump"):
+            return dict(usage.model_dump())
+        if hasattr(usage, "__dict__"):
+            return dict(vars(usage))
+        return None
