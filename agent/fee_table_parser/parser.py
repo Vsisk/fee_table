@@ -11,7 +11,7 @@ from agent.fee_table_parser.scheduler import (
     MockFeeTableEventProvider,
 )
 from agent.llm.config import OpenAISettings, load_openai_settings
-from agent.llm.llm_client import LLMClient
+from agent.llm.llm_client import OpenAILLMClient
 
 
 class FeeTableLogicAreaParser:
@@ -21,7 +21,7 @@ class FeeTableLogicAreaParser:
     @classmethod
     def from_settings(cls, settings: OpenAISettings) -> "FeeTableLogicAreaParser":
         if settings.is_usable:
-            return cls(LLMFeeTableEventProvider(client=LLMClient(settings=settings)))
+            return cls(LLMFeeTableEventProvider(client=OpenAILLMClient()))
         return cls(MockFeeTableEventProvider())
 
     def normalize_input(self, parse_input: FeeTableParseInput) -> FeeTableSourceView:
@@ -50,5 +50,5 @@ class FeeTableLogicAreaParser:
 def _default_event_provider() -> FeeTableEventProvider:
     settings = load_openai_settings()
     if settings.is_usable:
-        return LLMFeeTableEventProvider(client=LLMClient(settings=settings))
+        return LLMFeeTableEventProvider(client=OpenAILLMClient())
     return MockFeeTableEventProvider()

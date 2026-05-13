@@ -12,6 +12,7 @@ from agent.fee_table_parser.event_schema import (
 from agent.fee_table_parser.id_generator import FeeTableIdGenerator
 from agent.fee_table_parser.models import (
     ColumnTerm,
+    ColumnsDefinition,
     CrossRelation,
     FeeCategoryInfo,
     FeeCategoryTerm,
@@ -39,17 +40,8 @@ class FeeTableStreamReducer:
     ) -> None:
         self.source_view = source_view
         self.id_generator = id_generator or FeeTableIdGenerator()
-        self.root = FeeCategoryTerm(
-            fee_category_id="fee_table_root",
-            fee_category_type="parent",
-            seq=0,
-            fee_category_info=FeeCategoryInfo(
-                fee_category_name="fee_table_root",
-                pdf_field_name="",
-                edsl_semi_struct="",
-                is_display_name=False,
-            ),
-        )
+        self.root = None
+        self._root_columns: list[ColumnTerm] = []
         self._path_to_category: dict[tuple[str, ...], FeeCategoryTerm] = {}
         self._explicit_paths: set[tuple[str, ...]] = set()
         self._auto_paths: set[tuple[str, ...]] = set()
@@ -110,8 +102,7 @@ class FeeTableStreamReducer:
                 "pdf_example": column.pdf_example,
                 "pdf_field_name": column.pdf_field_name,
             }
-            for column in self.root.columns
-            if isinstance(column, ColumnTerm)
+            for column in self._root_columns
         ]
         return json.dumps(payload, ensure_ascii=False)
 
@@ -153,8 +144,10 @@ class FeeTableStreamReducer:
             pdf_example=event.payload["pdf_example"],
             pdf_field_name=pdf_field_name,
         )
-        self.root.columns.append(column)
-        self.root.columns.sort(key=lambda item: item.field_id if isinstance(item, ColumnTerm) else str(item))
+        self._root_columns.append(column)
+        self._root_columns.sort(key=lambda item: item.field_id)
+        if self.root is not None:
+            self.root.columns_definition = self._columns_definition()
         self._column_signature_to_field_id[signature] = column.field_id
 
     def _next_column_key(self, column_key: str, pdf_field_name: str) -> str:
@@ -174,18 +167,20 @@ class FeeTableStreamReducer:
         path = tuple(event.payload["path"])
         if path in self._explicit_paths:
             raise ValueError(f"duplicate category path: {path}")
+        if self.root is None:
+            return self._apply_first_raw_category_detected(event, path)
         self._ensure_parent_paths(path)
         parent = self._parent_for_path(path)
         seq = len(parent.children) + 1
+        pdf_name = event.payload.get("pdf_field_name", "")
         category = FeeCategoryTerm(
-            fee_category_id=self.id_generator.new_id(),
             fee_category_type=event.payload["fee_category_type"],
             seq=seq,
             fee_category_info=FeeCategoryInfo(
                 fee_category_name=event.payload["fee_category_name"],
-                pdf_field_name=event.payload["fee_category_name"],
+                pdf_field_name=pdf_name,
                 category_type=event.payload.get("category_type"),
-                is_display_name=True,
+                is_display_name=True if pdf_name else False,
             ),
         )
         parent.children.append(category)
@@ -193,6 +188,52 @@ class FeeTableStreamReducer:
         self._explicit_paths.add(path)
         self._open_paths.add(path)
         return ReducerApplyResult()
+
+    def _apply_first_raw_category_detected(
+        self,
+        event: RawFeeTableEvent,
+        path: tuple[str, ...],
+    ) -> ReducerApplyResult:
+        if event.payload["fee_category_type"] == "leaf":
+            pdf_name = event.payload.get("pdf_field_name", "")
+            self.root = FeeCategoryTerm(
+                fee_category_type="leaf",
+                seq=0,
+                fee_category_info=FeeCategoryInfo(
+                    fee_category_name=event.payload["fee_category_name"],
+                    pdf_field_name=pdf_name,
+                    category_type=event.payload.get("category_type"),
+                    is_display_name=True if pdf_name else False,
+                ),
+                columns_definition=self._columns_definition(),
+            )
+            self._path_to_category[path] = self.root
+            self._explicit_paths.add(path)
+            self._open_paths.add(path)
+            return ReducerApplyResult()
+
+        self.root = FeeCategoryTerm(
+            fee_category_type="root",
+            seq=0,
+            fee_category_info=FeeCategoryInfo(
+                fee_category_name="fee_table_root",
+                pdf_field_name="",
+                is_display_name=False,
+            ),
+            columns_definition=self._columns_definition(),
+        )
+        return self._apply_raw_category_detected(event)
+
+    def _columns_definition(self) -> list[ColumnsDefinition]:
+        return [
+            ColumnsDefinition(
+                field_id=column.field_id,
+                field_name=column.column_key,
+                cbs_name=column.pdf_field_name,
+                is_sum=column.is_sum,
+            )
+            for column in self._root_columns
+        ]
 
     def _ensure_parent_paths(self, path: tuple[str, ...]) -> None:
         for index in range(1, len(path)):
@@ -215,6 +256,8 @@ class FeeTableStreamReducer:
             self._auto_paths.add(parent_path)
 
     def _parent_for_path(self, path: tuple[str, ...]) -> FeeCategoryTerm:
+        if self.root is None:
+            raise ValueError("root category has not been initialized")
         if len(path) == 1:
             return self.root
         parent_path = path[:-1]
@@ -235,7 +278,7 @@ class FeeTableStreamReducer:
         category = self._path_to_category[path]
         if category.fee_category_type != "leaf":
             raise ValueError(f"leaf_columns_bound target is not a leaf: {path}")
-        root_field_ids = {column.field_id for column in self.root.columns if isinstance(column, ColumnTerm)}
+        root_field_ids = {column.field_id for column in self._root_columns}
         field_ids = sorted(set(event.payload["field_ids"]))
         missing = [field_id for field_id in field_ids if field_id not in root_field_ids]
         if missing:

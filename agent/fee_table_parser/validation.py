@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent.fee_table_parser.models import ColumnTerm, CrossRelation, FeeCategoryTerm
+from agent.fee_table_parser.models import CrossRelation, FeeCategoryTerm
 
 
 def validate_fee_category_tree(
@@ -8,9 +8,7 @@ def validate_fee_category_tree(
     relations: list[CrossRelation] | None = None,
 ) -> None:
     category_ids: set[str] = set()
-    if root.fee_category_id != "fee_table_root" and root.columns:
-        raise ValueError("non-root parent category cannot contain columns")
-    root_field_ids = _validate_root_columns(root)
+    root_field_ids = _validate_root_columns_definition(root)
     _validate_category(root, category_ids, root_field_ids, is_root=True)
     for relation in relations or []:
         for category_id in relation.source_category_ids:
@@ -20,20 +18,16 @@ def validate_fee_category_tree(
             raise ValueError(f"relation target_category_id references unknown category: {relation.target_category_id}")
 
 
-def _validate_root_columns(root: FeeCategoryTerm) -> set[str]:
+def _validate_root_columns_definition(root: FeeCategoryTerm) -> set[str]:
     field_ids: set[str] = set()
-    column_keys: set[str] = set()
-    for column in root.columns:
-        if not isinstance(column, ColumnTerm):
-            raise ValueError("root columns must contain ColumnTerm objects")
+    field_names: set[str] = set()
+    for column in root.columns_definition or []:
         if column.field_id in field_ids:
             raise ValueError(f"field_id must be unique: {column.field_id}")
-        if column.column_key in column_keys:
-            raise ValueError(f"column_key must be unique after suffixing: {column.column_key}")
-        if column.edsl_semi_struct != "":
-            raise ValueError("column edsl_semi_struct must be empty")
+        if column.field_name in field_names:
+            raise ValueError(f"field_name must be unique after suffixing: {column.field_name}")
         field_ids.add(column.field_id)
-        column_keys.add(column.column_key)
+        field_names.add(column.field_name)
     return field_ids
 
 
@@ -58,14 +52,14 @@ def _validate_category(
             raise ValueError("leaf category requires category_type")
         if category.children:
             raise ValueError("leaf category cannot contain children")
-        for field_id in category.columns:
+        for field_id in category.columns or []:
             if not isinstance(field_id, str):
                 raise ValueError("leaf columns must contain root field_id strings")
             if field_id not in root_field_ids:
                 raise ValueError(f"leaf columns reference unknown root column field_id: {field_id}")
 
     seen_child_seq: set[int] = set()
-    for child in category.children:
+    for child in category.children or []:
         if child.seq in seen_child_seq:
             raise ValueError(f"same parent cannot contain duplicate category seq: {child.seq}")
         seen_child_seq.add(child.seq)
@@ -82,8 +76,8 @@ def _validate_category(
 
 def _collect_leaf_field_ids(category: FeeCategoryTerm) -> set[str]:
     if category.fee_category_type == "leaf":
-        return {field_id for field_id in category.columns if isinstance(field_id, str)}
+        return {field_id for field_id in category.columns or [] if isinstance(field_id, str)}
     field_ids: set[str] = set()
-    for child in category.children:
+    for child in category.children or []:
         field_ids.update(_collect_leaf_field_ids(child))
     return field_ids

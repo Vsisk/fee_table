@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from enum import StrEnum
+import datetime
+import secrets
+import string
+from enum import Enum, StrEnum
 import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def generate_id() -> str:
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
+    random_suffix = ''.join(secrets.choice(string.digits) for _ in range(8))
+
+    return timestamp + random_suffix
 
 
 class ParseStatus(StrEnum):
@@ -66,6 +76,7 @@ class ColumnTerm(BaseModel):
     pdf_example: str
     pdf_field_name: str = ""
     edsl_semi_struct: str = ""
+    is_sum: bool = False
     logic_data_node: MockLogicDataNode | None = None
 
     @model_validator(mode="after")
@@ -79,6 +90,10 @@ class ColumnTerm(BaseModel):
         return self
 
 
+class EdslSemiStructTerm(BaseModel):
+    pass
+
+
 class FeeCategoryInfo(BaseModel):
     fee_category_name: str
     pdf_field_name: str = ""
@@ -86,69 +101,90 @@ class FeeCategoryInfo(BaseModel):
     edsl_semi_struct: str = ""
     is_display_name: bool = True
 
-    @model_validator(mode="after")
-    def clear_edsl(self) -> "FeeCategoryInfo":
-        self.edsl_semi_struct = ""
-        return self
+
+class LoopInfo(BaseModel):
+    is_loop: bool = False
+    edsl_semi_struct: str = ""
 
 
 class SummaryField(BaseModel):
     field_id: list[str] = Field(default_factory=list)
     field_name: str
     edsl_semi_struct: str = ""
-    summary_type: str = "sum"
+    summary_type: Literal["count", "sum"] = "sum"
     is_virtual: bool = False
-
-    @model_validator(mode="after")
-    def clear_edsl(self) -> "SummaryField":
-        self.edsl_semi_struct = ""
-        return self
 
 
 class SummaryInfo(BaseModel):
     summary_title: str
-    is_display_title: bool = True
-    edsl_semi_struct: str = ""
+    edsl_semi_struct: EdslSemiStructTerm = Field(default_factory=EdslSemiStructTerm)
     summary_fields: list[SummaryField] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def clear_edsl(self) -> "SummaryInfo":
-        self.edsl_semi_struct = ""
-        return self
-
-
-class LoopInfo(BaseModel):
-    is_loop: bool = False
-    edsl_semi_struct: str = ""
-
-    @model_validator(mode="after")
-    def clear_edsl(self) -> "LoopInfo":
-        self.edsl_semi_struct = ""
-        return self
+    is_display_title: bool = True
 
 
 class ChildrenSortRule(BaseModel):
-    is_sort: bool = True
-    edsl_semi_struct: str = ""
-    sort_basis: str = "display_order"
+    is_sort: bool
+    edsl_semi_struct: EdslSemiStructTerm = Field(default_factory=EdslSemiStructTerm)
 
-    @model_validator(mode="after")
-    def clear_edsl(self) -> "ChildrenSortRule":
-        self.edsl_semi_struct = ""
-        return self
+
+class ColumnsDefinition(BaseModel):
+    field_id: str
+    field_name: str
+    cbs_name: str = ""
+    is_sum: bool = False
+
+
+class Column(BaseModel):
+    field_id: str
+    field_name: str
+    edsl_semi_struct: EdslSemiStructTerm = Field(default_factory=EdslSemiStructTerm)
+    is_sum: bool = False
+    cbs_name: str = ""
+
+
+class FeeType(str, Enum):
+    charge = "charge"
+    free_unit = "free_unit"
+    financial_activity = "financial_activity"
+
+
+class FeeCategoryType(str, Enum):
+    parent = "parent"
+    leaf = "leaf"
+    root = "root"
 
 
 class FeeCategoryTerm(BaseModel):
-    fee_category_id: str
-    fee_category_type: Literal["parent", "leaf"]
+    fee_category_id: str = Field(default_factory=lambda: generate_id())
+    fee_category_type: str
     seq: int
     fee_category_info: FeeCategoryInfo
-    children: list["FeeCategoryTerm"] = Field(default_factory=list)
-    columns: list[ColumnTerm | str] = Field(default_factory=list)
-    summary_info: list[SummaryInfo] = Field(default_factory=list)
     loop_info: LoopInfo | None = None
+    summary_info: list[SummaryInfo] = Field(default_factory=list)
     children_sort_rule: ChildrenSortRule | None = None
+    columns: list[Any] | None = None
+    fee_type: FeeType | None = None
+    reference_node_id: str | None = None
+    columns_definition: list[ColumnsDefinition] | None = None
+    children: list["FeeCategoryTerm"] | None = None
     closed: bool = False
+
+    @model_validator(mode="after")
+    def validate_conditions(self) -> "FeeCategoryTerm":
+        if self.fee_category_type == FeeCategoryType.leaf:
+            if self.columns is None:
+                self.columns = []
+            if self.fee_type is None:
+                self.fee_type = FeeType.charge
+        elif self.fee_category_type == FeeCategoryType.parent:
+            if self.children is None:
+                self.children = []
+        elif self.fee_category_type == FeeCategoryType.root:
+            if self.children is None:
+                self.children = []
+            if self.columns_definition is None:
+                self.columns_definition = []
+        return self
 
 
 class CrossRelation(BaseModel):

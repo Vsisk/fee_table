@@ -31,6 +31,7 @@ class RawColumnDetectedPayload(BaseModel):
     column_key: str
     pdf_example: str
     pdf_field_name: str
+    is_sum: bool
 
 
 class RawColumnsFinalizedPayload(BaseModel):
@@ -43,6 +44,7 @@ class RawCategoryDetectedPayload(BaseModel):
     path: list[str]
     fee_category_name: str
     fee_category_type: Literal["parent", "leaf"]
+    pdf_field_name: str = ""
     category_type: Literal["charge", "free_unit", "financial_fee"] | None = None
 
     @model_validator(mode="after")
@@ -89,12 +91,27 @@ RAW_PAYLOAD_SCHEMAS: dict[FeeTableEventType, type[BaseModel]] = {
 }
 
 
+def parse_raw_jsonl(
+    jsonl: str,
+    allowed_event_types: set[FeeTableEventType] | None = None,
+) -> list["RawFeeTableEvent"]:
+    events: list[RawFeeTableEvent] = []
+    for line_number, line in enumerate(jsonl.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        event = RawFeeTableEvent.model_validate(json.loads(stripped))
+        if allowed_event_types is not None and event.event_type not in allowed_event_types:
+            raise ValueError(f"event_type {event.event_type} is not allowed on line {line_number}")
+        events.append(event)
+    return events
+
+
 class RawFeeTableEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_type: FeeTableEventType
     payload: dict[str, Any] = Field(default_factory=dict)
-    evidence: dict[str, Any] = Field(default_factory=dict)
     status: ParseStatus = ParseStatus.CONFIRMED
 
     @model_validator(mode="after")
@@ -105,55 +122,7 @@ class RawFeeTableEvent(BaseModel):
             raise ValueError(f"raw event_type {self.event_type} is not supported")
         schema = RAW_PAYLOAD_SCHEMAS[self.event_type]
         self.payload = schema.model_validate(self.payload).model_dump()
-        assert_no_real_mapping_fields(self.payload)
         return self
-
-
-def parse_raw_event_line(
-    line: str,
-    allowed_event_types: set[FeeTableEventType] | None = None,
-) -> RawFeeTableEvent:
-    raw = json.loads(line)
-    event = RawFeeTableEvent.model_validate(raw)
-    if allowed_event_types is not None and event.event_type not in allowed_event_types:
-        raise ValueError(f"event_type {event.event_type} is not allowed in this stream")
-    return event
-
-
-def parse_raw_jsonl(
-    jsonl: str,
-    allowed_event_types: set[FeeTableEventType] | None = None,
-) -> list[RawFeeTableEvent]:
-    events: list[RawFeeTableEvent] = []
-    for line in jsonl.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        events.append(parse_raw_event_line(stripped, allowed_event_types))
-    return events
-
-
-def assert_no_real_mapping_fields(value: Any) -> None:
-    prohibited = {
-        "data_source",
-        "expression",
-        "BO",
-        "context",
-        "function",
-        "resource_id",
-        "xml_path",
-        "XML path",
-        "mapping_tree",
-    }
-    if isinstance(value, dict):
-        overlap = prohibited.intersection(value)
-        if overlap:
-            raise ValueError(f"real mapping fields are prohibited: {sorted(overlap)}")
-        for item in value.values():
-            assert_no_real_mapping_fields(item)
-    elif isinstance(value, list):
-        for item in value:
-            assert_no_real_mapping_fields(item)
 
 
 def _validate_path(path: list[str]) -> None:
