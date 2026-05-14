@@ -4,12 +4,9 @@ from dataclasses import dataclass, field
 import json
 
 from agent.fee_table_parser.event_schema import (
-    CATEGORY_EVENT_TYPES,
-    COLUMN_EVENT_TYPES,
     RawFeeTableEvent,
     parse_raw_jsonl,
 )
-from agent.fee_table_parser.id_generator import FeeTableIdGenerator
 from agent.fee_table_parser.models import (
     ColumnTerm,
     ColumnsDefinition,
@@ -35,18 +32,12 @@ class ReducerApplyResult:
 class FeeTableStreamReducer:
     def __init__(
         self,
-        source_view: FeeTableSourceView | None = None
+        source_view: FeeTableSourceView | None = None,
     ) -> None:
         self.source_view = source_view
         self.root = None
+        self._category_stack: list[FeeCategoryTerm] = []
         self._root_columns: list[ColumnTerm] = []
-        self._path_to_category: dict[tuple[str, ...], FeeCategoryTerm] = {}
-        self._explicit_paths: set[tuple[str, ...]] = set()
-        self._auto_paths: set[tuple[str, ...]] = set()
-        self._open_paths: set[tuple[str, ...]] = set()
-        self._closed_paths: set[tuple[str, ...]] = set()
-        self._pending_leaf_bindings: list[RawFeeTableEvent] = []
-        self._pending_category_closes: list[RawFeeTableEvent] = []
         self._columns_finalized = False
         self._column_keys_by_original: dict[str, set[str]] = {}
         self._column_signature_to_field_id: dict[tuple[str, str], str] = {}
@@ -74,18 +65,12 @@ class FeeTableStreamReducer:
         if event.event_type == FeeTableEventType.COLUMNS_FINALIZED:
             self._columns_finalized = True
             return ReducerApplyResult()
-        if event.event_type == FeeTableEventType.CATEGORY_DETECTED:
-            result = self._apply_raw_category_detected(event)
-            result.extend(self._drain_pending())
-            return result
-        if event.event_type == FeeTableEventType.LEAF_COLUMNS_BOUND:
-            result = self._apply_raw_leaf_columns_bound_or_pending(event)
-            result.extend(self._drain_pending())
-            return result
-        if event.event_type == FeeTableEventType.CATEGORY_CLOSED:
-            result = self._apply_raw_category_closed_or_pending(event)
-            result.extend(self._drain_pending())
-            return result
+        if event.event_type == FeeTableEventType.CATEGORY_OPEN:
+            return self._apply_raw_category_open(event)
+        if event.event_type == FeeTableEventType.CATEGORY_LEAF:
+            return self._apply_raw_category_leaf(event)
+        if event.event_type == FeeTableEventType.CATEGORY_CLOSE:
+            return self._apply_raw_category_close()
         raise ValueError(f"unsupported raw event_type: {event.event_type}")
 
     def ensure_columns_finalized(self) -> None:
@@ -105,16 +90,100 @@ class FeeTableStreamReducer:
         return json.dumps(payload, ensure_ascii=False)
 
     def finalize_category_stream(self) -> ReducerApplyResult:
-        result = self._drain_pending()
-        unresolved_closes = [event.payload["path"] for event in self._pending_category_closes]
-        unresolved_bindings = [event.payload["path"] for event in self._pending_leaf_bindings]
-        if unresolved_closes:
-            raise ValueError(f"pending category_closed events could not be resolved: {unresolved_closes}")
-        if unresolved_bindings:
-            raise ValueError(f"pending leaf_columns_bound events could not be resolved: {unresolved_bindings}")
-        if self._open_paths:
-            raise ValueError(f"category paths were detected but not closed: {sorted(self._open_paths)}")
-        return result
+        if len(self._category_stack) > 1:
+            names = [
+                category.fee_category_info.fee_category_name
+                for category in self._category_stack[1:]
+            ]
+            raise ValueError(f"category stack has unclosed parent categories: {names}")
+        return ReducerApplyResult()
+
+    def _apply_raw_category_open(self, event: RawFeeTableEvent) -> ReducerApplyResult:
+        self._ensure_stack_root()
+        parent = self._category_stack[-1]
+        category = FeeCategoryTerm(
+            fee_category_type="parent",
+            seq=len(parent.children) + 1,
+            fee_category_info=FeeCategoryInfo(
+                fee_category_name=event.payload["fee_category_name"],
+                pdf_field_name=event.payload.get("pdf_key", ""),
+                is_display_name=bool(event.payload.get("pdf_key", "")),
+            ),
+        )
+        parent.children.append(category)
+        self._category_stack.append(category)
+        return ReducerApplyResult()
+
+    def _apply_raw_category_leaf(self, event: RawFeeTableEvent) -> ReducerApplyResult:
+        field_ids = self._validated_root_field_ids(event.payload["field_ids"])
+        if self.root is None:
+            self.root = FeeCategoryTerm(
+                fee_category_type="leaf",
+                seq=0,
+                fee_category_info=FeeCategoryInfo(
+                    fee_category_name=event.payload["fee_category_name"],
+                    pdf_field_name=event.payload.get("pdf_key", ""),
+                    category_type=event.payload["category_type"],
+                    is_display_name=bool(event.payload.get("pdf_key", "")),
+                ),
+                columns_definition=self._columns_definition(),
+                columns=field_ids,
+            )
+            self.root.closed = True
+            return ReducerApplyResult(closed_category_ids=[self.root.fee_category_id])
+
+        if self.root.fee_category_type == "leaf":
+            raise ValueError("cannot append category events after a leaf root has been created")
+
+        parent = self._category_stack[-1]
+        category = FeeCategoryTerm(
+            fee_category_type="leaf",
+            seq=len(parent.children) + 1,
+            fee_category_info=FeeCategoryInfo(
+                fee_category_name=event.payload["fee_category_name"],
+                pdf_field_name=event.payload.get("pdf_key", ""),
+                category_type=event.payload["category_type"],
+                is_display_name=bool(event.payload.get("pdf_key", "")),
+            ),
+            columns=field_ids,
+        )
+        parent.children.append(category)
+        category.closed = True
+        return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
+
+    def _apply_raw_category_close(self) -> ReducerApplyResult:
+        if not self._category_stack or len(self._category_stack) == 1:
+            raise ValueError("category_close requires an open parent category")
+        category = self._category_stack.pop()
+        category.closed = True
+        return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
+
+    def _ensure_stack_root(self) -> None:
+        if self.root is None:
+            self.root = FeeCategoryTerm(
+                fee_category_type="root",
+                seq=0,
+                fee_category_info=FeeCategoryInfo(
+                    fee_category_name="fee_table_root",
+                    pdf_field_name="",
+                    is_display_name=False,
+                ),
+                columns_definition=self._columns_definition(),
+            )
+            self._category_stack = [self.root]
+            return
+        if self.root.fee_category_type == "leaf":
+            raise ValueError("cannot open a parent category after a leaf root has been created")
+        if not self._category_stack:
+            self._category_stack = [self.root]
+
+    def _validated_root_field_ids(self, field_ids: list[str]) -> list[str]:
+        root_field_ids = {column.field_id for column in self._root_columns}
+        normalized_field_ids = sorted(set(field_ids))
+        missing = [field_id for field_id in normalized_field_ids if field_id not in root_field_ids]
+        if missing:
+            raise ValueError(f"category_leaf references unknown root column field_id: {missing}")
+        return normalized_field_ids
 
     def finalize_section(self) -> FeeTableLogicArea:
         validate_fee_category_tree(self.root, self._relations)
@@ -160,67 +229,6 @@ class FeeTableStreamReducer:
                 return candidate
             suffix += 1
 
-    def _apply_raw_category_detected(self, event: RawFeeTableEvent) -> ReducerApplyResult:
-        path = tuple(event.payload["path"])
-        if path in self._explicit_paths:
-            raise ValueError(f"duplicate category path: {path}")
-        if self.root is None:
-            return self._apply_first_raw_category_detected(event, path)
-        self._ensure_parent_paths(path)
-        parent = self._parent_for_path(path)
-        seq = len(parent.children) + 1
-        pdf_name = event.payload.get("pdf_key", "")
-        category = FeeCategoryTerm(
-            fee_category_type=event.payload["fee_category_type"],
-            seq=seq,
-            fee_category_info=FeeCategoryInfo(
-                fee_category_name=event.payload["fee_category_name"],
-                pdf_key=pdf_name,
-                category_type=event.payload.get("category_type"),
-                is_display_name=True if pdf_name else False,
-            ),
-        )
-        parent.children.append(category)
-        self._path_to_category[path] = category
-        self._explicit_paths.add(path)
-        self._open_paths.add(path)
-        return ReducerApplyResult()
-
-    def _apply_first_raw_category_detected(
-        self,
-        event: RawFeeTableEvent,
-        path: tuple[str, ...],
-    ) -> ReducerApplyResult:
-        if event.payload["fee_category_type"] == "leaf":
-            pdf_name = event.payload.get("pdf_key", "")
-            self.root = FeeCategoryTerm(
-                fee_category_type="leaf",
-                seq=0,
-                fee_category_info=FeeCategoryInfo(
-                    fee_category_name=event.payload["fee_category_name"],
-                    pdf_key=pdf_name,
-                    category_type=event.payload.get("category_type"),
-                    is_display_name=True if pdf_name else False,
-                ),
-                columns_definition=self._columns_definition(),
-            )
-            self._path_to_category[path] = self.root
-            self._explicit_paths.add(path)
-            self._open_paths.add(path)
-            return ReducerApplyResult()
-
-        self.root = FeeCategoryTerm(
-            fee_category_type="root",
-            seq=0,
-            fee_category_info=FeeCategoryInfo(
-                fee_category_name="fee_table_root",
-                pdf_key="",
-                is_display_name=False,
-            ),
-            columns_definition=self._columns_definition(),
-        )
-        return self._apply_raw_category_detected(event)
-
     def _columns_definition(self) -> list[ColumnsDefinition]:
         return [
             ColumnsDefinition(
@@ -231,123 +239,3 @@ class FeeTableStreamReducer:
             )
             for column in self._root_columns
         ]
-
-    def _ensure_parent_paths(self, path: tuple[str, ...]) -> None:
-        for index in range(1, len(path)):
-            parent_path = path[:index]
-            if parent_path in self._path_to_category:
-                continue
-            parent = self._parent_for_path(parent_path)
-            category = FeeCategoryTerm(
-                fee_category_id=self.id_generator.new_id(),
-                fee_category_type="parent",
-                seq=len(parent.children) + 1,
-                fee_category_info=FeeCategoryInfo(
-                    fee_category_name=parent_path[-1],
-                    pdf_key=parent_path[-1],
-                    is_display_name=True,
-                ),
-            )
-            parent.children.append(category)
-            self._path_to_category[parent_path] = category
-            self._auto_paths.add(parent_path)
-
-    def _parent_for_path(self, path: tuple[str, ...]) -> FeeCategoryTerm:
-        if self.root is None:
-            raise ValueError("root category has not been initialized")
-        if len(path) == 1:
-            return self.root
-        parent_path = path[:-1]
-        if parent_path not in self._path_to_category:
-            raise ValueError(f"missing parent path: {parent_path}")
-        return self._path_to_category[parent_path]
-
-    def _apply_raw_leaf_columns_bound_or_pending(self, event: RawFeeTableEvent) -> ReducerApplyResult:
-        if self._apply_raw_leaf_columns_bound(event):
-            return ReducerApplyResult()
-        self._pending_leaf_bindings.append(event)
-        return ReducerApplyResult()
-
-    def _apply_raw_leaf_columns_bound(self, event: RawFeeTableEvent) -> bool:
-        path = tuple(event.payload["path"])
-        if path not in self._path_to_category:
-            return False
-        category = self._path_to_category[path]
-        if category.fee_category_type != "leaf":
-            raise ValueError(f"leaf_columns_bound target is not a leaf: {path}")
-        root_field_ids = {column.field_id for column in self._root_columns}
-        field_ids = sorted(set(event.payload["field_ids"]))
-        missing = [field_id for field_id in field_ids if field_id not in root_field_ids]
-        if missing:
-            raise ValueError(f"leaf_columns_bound references unknown root column field_id: {missing}")
-        category.columns = field_ids
-        return True
-
-    def _apply_raw_category_closed_or_pending(self, event: RawFeeTableEvent) -> ReducerApplyResult:
-        result = self._apply_raw_category_closed(event)
-        if result is not None:
-            return result
-        self._pending_category_closes.append(event)
-        return ReducerApplyResult()
-
-    def _apply_raw_category_closed(self, event: RawFeeTableEvent) -> ReducerApplyResult | None:
-        path = tuple(event.payload["path"])
-        if path not in self._path_to_category:
-            return None
-        if path in self._closed_paths:
-            raise ValueError(f"category path is already closed: {path}")
-        open_descendants = [
-            candidate for candidate in self._open_paths if len(candidate) > len(path) and candidate[: len(path)] == path
-        ]
-        if open_descendants:
-            return None
-        category = self._path_to_category[path]
-        category.closed = True
-        self._closed_paths.add(path)
-        self._open_paths.discard(path)
-        result = ReducerApplyResult(closed_category_ids=[category.fee_category_id])
-        result.extend(self._close_auto_ancestors())
-        return result
-
-    def _close_auto_ancestors(self) -> ReducerApplyResult:
-        result = ReducerApplyResult()
-        changed = True
-        while changed:
-            changed = False
-            for path in sorted(self._auto_paths - self._closed_paths, key=len, reverse=True):
-                open_descendants = [
-                    candidate
-                    for candidate in self._open_paths
-                    if len(candidate) > len(path) and candidate[: len(path)] == path
-                ]
-                if open_descendants:
-                    continue
-                category = self._path_to_category[path]
-                category.closed = True
-                self._closed_paths.add(path)
-                changed = True
-        return result
-
-    def _drain_pending(self) -> ReducerApplyResult:
-        result = ReducerApplyResult()
-        progressed = True
-        while progressed:
-            progressed = False
-            remaining_bindings: list[RawFeeTableEvent] = []
-            for event in self._pending_leaf_bindings:
-                if self._apply_raw_leaf_columns_bound(event):
-                    progressed = True
-                else:
-                    remaining_bindings.append(event)
-            self._pending_leaf_bindings = remaining_bindings
-
-            remaining_closes: list[RawFeeTableEvent] = []
-            for event in self._pending_category_closes:
-                close_result = self._apply_raw_category_closed(event)
-                if close_result is None:
-                    remaining_closes.append(event)
-                else:
-                    result.extend(close_result)
-                    progressed = True
-            self._pending_category_closes = remaining_closes
-        return result

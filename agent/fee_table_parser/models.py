@@ -27,10 +27,13 @@ class ParseStatus(StrEnum):
 class FeeTableEventType(StrEnum):
     TABLE_PROFILE_DETECTED = "table_profile_detected"
     CATEGORY_DETECTED = "category_detected"
+    CATEGORY_OPEN = "category_open"
+    CATEGORY_LEAF = "category_leaf"
     COLUMN_DETECTED = "column_detected"
     COLUMNS_FINALIZED = "columns_finalized"
     LEAF_COLUMNS_BOUND = "leaf_columns_bound"
     CATEGORY_CLOSED = "category_closed"
+    CATEGORY_CLOSE = "category_close"
     SUMMARY_DETECTED = "summary_detected"
     LOOP_RULE_DETECTED = "loop_rule_detected"
     SORT_RULE_DETECTED = "sort_rule_detected"

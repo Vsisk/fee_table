@@ -50,7 +50,10 @@ class LLMFeeTableEventProvider:
             stream=True,
             response_format=None,
             image_url=source_view.visual_input if source_view.visual_input else None,
-            table_md="",
+            source_block=_source_block(source_view),
+            table_md=source_view.text_input or "",
+            specific_extraction_rules="",
+            query="",
             **variables,
         )
         allowed_event_types = PROMPT_ALLOWED_EVENT_TYPES[task]

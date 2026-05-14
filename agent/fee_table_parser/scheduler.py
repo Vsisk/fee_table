@@ -51,25 +51,25 @@ class MockFeeTableEventProvider:
                 {
                     "event_type": "column_detected",
                     "payload": {
-                        "column_key": "description",
-                        "pdf_example": "Voice Call",
-                        "pdf_field_name": "Description",
+                        "cbs_key": "description",
+                        "pdf_exp": "Voice Call",
+                        "pdf_key": "Description",
                     },
                 },
                 {
                     "event_type": "column_detected",
                     "payload": {
-                        "column_key": "amount",
-                        "pdf_example": "99.00",
-                        "pdf_field_name": "Amount",
+                        "cbs_key": "amount",
+                        "pdf_exp": "99.00",
+                        "pdf_key": "Amount",
                     },
                 },
                 {
                     "event_type": "column_detected",
                     "payload": {
-                        "column_key": "quantity",
-                        "pdf_example": "2 SMS",
-                        "pdf_field_name": "Quantity",
+                        "cbs_key": "quantity",
+                        "pdf_exp": "2 SMS",
+                        "pdf_key": "Quantity",
                     },
                 },
                 {"event_type": "columns_finalized", "payload": {}},
@@ -85,76 +85,42 @@ class MockFeeTableEventProvider:
         return _jsonl(
             [
                 {
-                    "event_type": "category_detected",
+                    "event_type": "category_open",
                     "payload": {
-                        "path": ["Exceeding package"],
                         "fee_category_name": "Exceeding package",
-                        "fee_category_type": "parent",
+                        "pdf_key": "Exceeding package",
                     },
                 },
                 {
-                    "event_type": "category_detected",
+                    "event_type": "category_leaf",
                     "payload": {
-                        "path": ["Exceeding package", "EXCEEDING PACKAGE"],
                         "fee_category_name": "EXCEEDING PACKAGE",
-                        "fee_category_type": "leaf",
+                        "pdf_key": "EXCEEDING PACKAGE",
                         "category_type": "charge",
-                    },
-                },
-                {
-                    "event_type": "leaf_columns_bound",
-                    "payload": {
-                        "path": ["Exceeding package", "EXCEEDING PACKAGE"],
                         "field_ids": [description, quantity, amount],
                     },
                 },
                 {
-                    "event_type": "category_closed",
-                    "payload": {"path": ["Exceeding package", "EXCEEDING PACKAGE"]},
-                },
-                {
-                    "event_type": "category_detected",
+                    "event_type": "category_leaf",
                     "payload": {
-                        "path": ["Exceeding package", "INTERNATIONAL CALLS"],
                         "fee_category_name": "INTERNATIONAL CALLS",
-                        "fee_category_type": "leaf",
+                        "pdf_key": "INTERNATIONAL CALLS",
                         "category_type": "charge",
-                    },
-                },
-                {
-                    "event_type": "leaf_columns_bound",
-                    "payload": {
-                        "path": ["Exceeding package", "INTERNATIONAL CALLS"],
                         "field_ids": [description, amount],
                     },
                 },
                 {
-                    "event_type": "category_closed",
-                    "payload": {"path": ["Exceeding package", "INTERNATIONAL CALLS"]},
-                },
-                {
-                    "event_type": "category_detected",
+                    "event_type": "category_leaf",
                     "payload": {
-                        "path": ["Exceeding package", "INTERNATIONAL ROAMING"],
                         "fee_category_name": "INTERNATIONAL ROAMING",
-                        "fee_category_type": "leaf",
+                        "pdf_key": "INTERNATIONAL ROAMING",
                         "category_type": "charge",
-                    },
-                },
-                {
-                    "event_type": "leaf_columns_bound",
-                    "payload": {
-                        "path": ["Exceeding package", "INTERNATIONAL ROAMING"],
                         "field_ids": [description, amount],
                     },
                 },
                 {
-                    "event_type": "category_closed",
-                    "payload": {"path": ["Exceeding package", "INTERNATIONAL ROAMING"]},
-                },
-                {
-                    "event_type": "category_closed",
-                    "payload": {"path": ["Exceeding package"]},
+                    "event_type": "category_close",
+                    "payload": {},
                 },
             ]
         )

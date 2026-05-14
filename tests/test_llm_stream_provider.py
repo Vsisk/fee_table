@@ -43,6 +43,9 @@ async def _assert_llm_provider_streams_validated_column_events():
     ]
     assert client.calls[0]["stream"] is True
     assert client.calls[0]["prompt_template"] == ["fee_table_root_columns"]
+    assert client.calls[0]["table_md"] == "| Amount |\n| 10.00 |"
+    assert client.calls[0]["specific_extraction_rules"] == ""
+    assert client.calls[0]["query"] == ""
 
 
 def test_scheduler_consumes_provider_event_streams():
@@ -70,7 +73,11 @@ def test_default_prompt_catalog_contains_fee_table_stream_templates():
 
     assert "column_detected" in root_columns_prompt
     assert "columns_finalized" in root_columns_prompt
-    assert "Allowed events: category_detected, leaf_columns_bound, category_closed" in categories_prompt
+    assert "specific_extraction_rules" in root_columns_prompt
+    assert "table_md" in root_columns_prompt
+    assert "query" in root_columns_prompt
+    assert "Allowed events: category_open, category_leaf, category_close" in categories_prompt
+    assert "严禁输出 path" in categories_prompt
 
 
 class FakeStreamingClient:
@@ -109,19 +116,13 @@ class StreamingEventProvider:
 
     async def _categories(self, field_id):
         yield {
-            "event_type": "category_detected",
+            "event_type": "category_leaf",
             "payload": {
-                "path": ["Usage"],
                 "fee_category_name": "Usage",
-                "fee_category_type": "leaf",
                 "category_type": "charge",
+                "field_ids": [field_id],
             },
         }
-        yield {
-            "event_type": "leaf_columns_bound",
-            "payload": {"path": ["Usage"], "field_ids": [field_id]},
-        }
-        yield {"event_type": "category_closed", "payload": {"path": ["Usage"]}}
 
 
 class SequentialIdGenerator:

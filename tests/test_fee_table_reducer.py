@@ -17,27 +17,21 @@ def test_first_leaf_category_becomes_leaf_root_with_columns_definition():
                     },
                 },
                 {"event_type": "columns_finalized", "payload": {}},
-                {
-                    "event_type": "category_detected",
-                    "payload": {
-                        "path": ["Usage"],
-                        "fee_category_name": "Usage",
-                        "fee_category_type": "leaf",
-                        "category_type": "charge",
-                    },
-                },
             ]
         )
     )
-    field_id = reducer.root.columns_definition[0].field_id
+    field_id = json.loads(reducer.column_pool_prompt_json())[0]["field_id"]
     reducer.consume_raw_jsonl(
         _jsonl(
             [
                 {
-                    "event_type": "leaf_columns_bound",
-                    "payload": {"path": ["Usage"], "field_ids": [field_id]},
+                    "event_type": "category_leaf",
+                    "payload": {
+                        "fee_category_name": "Usage",
+                        "category_type": "charge",
+                        "field_ids": [field_id],
+                    },
                 },
-                {"event_type": "category_closed", "payload": {"path": ["Usage"]}},
             ]
         )
     )
@@ -64,13 +58,12 @@ def test_first_parent_category_creates_root_with_columns_definition():
                 },
                 {"event_type": "columns_finalized", "payload": {}},
                 {
-                    "event_type": "category_detected",
+                    "event_type": "category_open",
                     "payload": {
-                        "path": ["Usage group"],
                         "fee_category_name": "Usage group",
-                        "fee_category_type": "parent",
                     },
                 },
+                {"event_type": "category_close", "payload": {}},
             ]
         )
     )
@@ -79,6 +72,74 @@ def test_first_parent_category_creates_root_with_columns_definition():
     assert reducer.root.columns_definition[0].field_name == "Amount"
     assert reducer.root.children[0].fee_category_type == "parent"
     assert reducer.root.children[0].fee_category_info.fee_category_name == "Usage group"
+
+
+def test_parent_category_must_be_explicitly_closed():
+    reducer = FeeTableStreamReducer()
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {"event_type": "columns_finalized", "payload": {}},
+                {
+                    "event_type": "category_open",
+                    "payload": {"fee_category_name": "Usage group"},
+                },
+            ]
+        )
+    )
+
+    try:
+        reducer.finalize_category_stream()
+    except ValueError as exc:
+        assert "category stack has unclosed parent categories" in str(exc)
+    else:
+        raise AssertionError("expected unclosed parent category to fail")
+
+
+def test_stack_protocol_nests_leaf_under_current_parent():
+    reducer = FeeTableStreamReducer()
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {
+                    "event_type": "column_detected",
+                    "payload": {
+                        "cbs_key": "amount",
+                        "pdf_exp": "10.00",
+                        "pdf_key": "Amount",
+                    },
+                },
+                {"event_type": "columns_finalized", "payload": {}},
+            ]
+        )
+    )
+    field_id = reducer.column_pool_prompt_json()
+    field_id = json.loads(field_id)[0]["field_id"]
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {
+                    "event_type": "category_open",
+                    "payload": {"fee_category_name": "Usage group"},
+                },
+                {
+                    "event_type": "category_leaf",
+                    "payload": {
+                        "fee_category_name": "Usage",
+                        "category_type": "charge",
+                        "field_ids": [field_id],
+                    },
+                },
+                {"event_type": "category_close", "payload": {}},
+            ]
+        )
+    )
+    reducer.finalize_category_stream()
+
+    parent = reducer.root.children[0]
+    assert parent.fee_category_info.fee_category_name == "Usage group"
+    assert parent.children[0].fee_category_info.fee_category_name == "Usage"
+    assert parent.children[0].columns == [field_id]
 
 
 def _jsonl(events):

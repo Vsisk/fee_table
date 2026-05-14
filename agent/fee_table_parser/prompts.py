@@ -6,9 +6,9 @@ from agent.fee_table_parser.event_schema import PROMPT_ALLOWED_EVENT_TYPES
 COMMON_JSONL_RULES = """
 Output JSONL only. Do not return Markdown, prose, or a complete logic_area.
 Each line must be one complete JSON object.
-Do not output ids: no event_id, target_id, parent_id, fee_category_id, or field_id unless the field_id is copied from the provided root column pool in a leaf_columns_bound event.
+Do not output ids: no event_id, target_id, parent_id, or fee_category_id.
 Use status only if needed; v1 supports confirmed events only.
-Never output data_source, expression, BO, context, function, resource_id, XML path, or mapping_tree.
+Never output data_source, expression, BO, context, function, resource_id, XML path, mapping_tree, or path.
 Every edsl_semi_struct must be omitted.
 """.strip()
 
@@ -26,15 +26,14 @@ End with exactly one columns_finalized event.
     "categories": f"""
 {COMMON_JSONL_RULES}
 Task: identify the fee category tree and bind leaf categories to the provided root column field_ids.
-Allowed events: category_detected, leaf_columns_bound, category_closed.
-Use payload.path as the category identity and hierarchy.
-category_detected.payload must contain path, fee_category_name, fee_category_type.
-For leaf category_detected, category_type is required and must be one of charge, free_unit, financial_fee.
-For parent category_detected, category_type must be omitted.
-leaf_columns_bound.payload must contain path and field_ids copied from the provided root column pool.
-category_closed.payload must contain path.
-Do not output summary_detected, loop_rule_detected, sort_rule_detected, relation_detected, or section_finalized.
-Every explicit category_detected must have one category_closed.
+Allowed events: category_open, category_leaf, category_close.
+Do not output payload.path. Code maintains the hierarchy with a stack.
+category_open enters a parent category; payload must contain fee_category_name and may contain pdf_key.
+category_leaf emits a leaf category; payload must contain fee_category_name, category_type, and field_ids copied from the provided root column pool.
+category_close leaves the current parent category; payload must be empty.
+Every category_open must have one explicit category_close after all children have been emitted.
+If the whole fee table has only one leaf category at the root, output exactly one category_leaf and no category_open/category_close.
+Do not output category_detected, leaf_columns_bound, category_closed, summary_detected, loop_rule_detected, sort_rule_detected, relation_detected, or section_finalized.
 """.strip(),
 }
 
