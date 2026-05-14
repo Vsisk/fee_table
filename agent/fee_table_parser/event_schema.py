@@ -17,6 +17,7 @@ CATEGORY_EVENT_TYPES = {
     FeeTableEventType.CATEGORY_OPEN,
     FeeTableEventType.CATEGORY_LEAF,
     FeeTableEventType.CATEGORY_CLOSE,
+    FeeTableEventType.SUMMARY_DETECTED,
 }
 
 PROMPT_ALLOWED_EVENT_TYPES: dict[str, set[FeeTableEventType]] = {
@@ -70,12 +71,42 @@ class RawCategoryClosePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RawSummaryDetectedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_title: str
+    summary_type: Literal["count", "sum"]
+    field_id: list[str | list[str]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_summary_detected_payload(self) -> "RawSummaryDetectedPayload":
+        if not self.summary_title.strip():
+            raise ValueError("summary_title must not be empty")
+        if not self.field_id:
+            raise ValueError("field_id must not be empty")
+        normalized_field_id: list[str | list[str]] = []
+        for item in self.field_id:
+            if isinstance(item, str):
+                if not item.strip():
+                    raise ValueError("field_id entries must not be empty")
+                normalized_field_id.append(item)
+                continue
+            if not item:
+                raise ValueError("grouped field_id entries must not be empty")
+            if any(not field_id.strip() for field_id in item):
+                raise ValueError("grouped field_id entries must not contain empty values")
+            normalized_field_id.append(item)
+        self.field_id = normalized_field_id
+        return self
+
+
 RAW_PAYLOAD_SCHEMAS: dict[FeeTableEventType, type[BaseModel]] = {
     FeeTableEventType.COLUMN_DETECTED: RawColumnDetectedPayload,
     FeeTableEventType.COLUMNS_FINALIZED: RawColumnsFinalizedPayload,
     FeeTableEventType.CATEGORY_OPEN: RawCategoryOpenPayload,
     FeeTableEventType.CATEGORY_LEAF: RawCategoryLeafPayload,
     FeeTableEventType.CATEGORY_CLOSE: RawCategoryClosePayload,
+    FeeTableEventType.SUMMARY_DETECTED: RawSummaryDetectedPayload,
 }
 
 
@@ -111,4 +142,3 @@ class RawFeeTableEvent(BaseModel):
         schema = RAW_PAYLOAD_SCHEMAS[self.event_type]
         self.payload = schema.model_validate(self.payload).model_dump()
         return self
-

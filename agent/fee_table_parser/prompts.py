@@ -26,14 +26,17 @@ End with exactly one columns_finalized event.
     "categories": f"""
 {COMMON_JSONL_RULES}
 Task: identify the fee category tree and bind leaf categories to the provided root column field_ids.
-Allowed events: category_open, category_leaf, category_close.
+Allowed events: category_open, category_leaf, category_close, summary_detected.
 Do not output payload.path. Code maintains the hierarchy with a stack.
 category_open enters a parent category; payload must contain fee_category_name and may contain pdf_key.
 category_leaf emits a leaf category; payload must contain fee_category_name, category_type, and field_ids copied from the provided root column pool.
+summary_detected emits one visible summary row for a category; payload must contain summary_title, summary_type (sum or count), and field_id.
+For a summary column that does not exist in the root column pool but is calculated from multiple root columns, output one grouped field_id entry such as [["vat_id", "amount_id"]].
+Emit a parent category's summary_detected immediately after its category_open, before its children. Emit a leaf category's summary_detected immediately after its category_leaf.
 category_close leaves the current parent category; payload must be empty.
 Every category_open must have one explicit category_close after all children have been emitted.
 If the whole fee table has only one leaf category at the root, output exactly one category_leaf and no category_open/category_close.
-Do not output category_detected, leaf_columns_bound, category_closed, summary_detected, loop_rule_detected, sort_rule_detected, relation_detected, or section_finalized.
+Do not output category_detected, leaf_columns_bound, category_closed, loop_rule_detected, sort_rule_detected, relation_detected, or section_finalized.
 """.strip(),
 }
 

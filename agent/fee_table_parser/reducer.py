@@ -17,6 +17,8 @@ from agent.fee_table_parser.models import (
     FeeTableEventType,
     FeeTableLogicArea,
     FeeTableSourceView,
+    SummaryField,
+    SummaryInfo,
 )
 from agent.fee_table_parser.validation import validate_fee_category_tree
 
@@ -43,6 +45,7 @@ class FeeTableStreamReducer:
         self._column_signature_to_field_id: dict[tuple[str, str], str] = {}
         self._relations: list[CrossRelation] = []
         self._section_finalized = False
+        self._latest_summary_target: FeeCategoryTerm | None = None
 
     @property
     def columns_finalized(self) -> bool:
@@ -71,6 +74,9 @@ class FeeTableStreamReducer:
             return self._apply_raw_category_leaf(event)
         if event.event_type == FeeTableEventType.CATEGORY_CLOSE:
             return self._apply_raw_category_close()
+        if event.event_type == FeeTableEventType.SUMMARY_DETECTED:
+            self._apply_raw_summary_detected(event)
+            return ReducerApplyResult()
         raise ValueError(f"unsupported raw event_type: {event.event_type}")
 
     def ensure_columns_finalized(self) -> None:
@@ -112,6 +118,7 @@ class FeeTableStreamReducer:
         )
         parent.children.append(category)
         self._category_stack.append(category)
+        self._latest_summary_target = category
         return ReducerApplyResult()
 
     def _apply_raw_category_leaf(self, event: RawFeeTableEvent) -> ReducerApplyResult:
@@ -130,6 +137,7 @@ class FeeTableStreamReducer:
                 columns=field_ids,
             )
             self.root.closed = True
+            self._latest_summary_target = self.root
             return ReducerApplyResult(closed_category_ids=[self.root.fee_category_id])
 
         if self.root.fee_category_type == "leaf":
@@ -149,6 +157,7 @@ class FeeTableStreamReducer:
         )
         parent.children.append(category)
         category.closed = True
+        self._latest_summary_target = category
         return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
 
     def _apply_raw_category_close(self) -> ReducerApplyResult:
@@ -157,6 +166,28 @@ class FeeTableStreamReducer:
         category = self._category_stack.pop()
         category.closed = True
         return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
+
+    def _apply_raw_summary_detected(self, event: RawFeeTableEvent) -> None:
+        target = self._latest_summary_target
+        if target is None:
+            raise ValueError("summary_detected requires a preceding category_open or category_leaf")
+
+        summary_fields = [
+            SummaryField(
+                field_id=self._validated_summary_field_ids(field_id),
+                field_name=event.payload["summary_title"],
+                summary_type=event.payload["summary_type"],
+                is_virtual=True if len(field_id) > 1 else False,
+            )
+            for field_id in event.payload["field_id"]
+        ]
+        target.summary_info.append(
+            SummaryInfo(
+                summary_title=event.payload["summary_title"],
+                summary_fields=summary_fields,
+                is_display_title=True
+            )
+        )
 
     def _ensure_stack_root(self) -> None:
         if self.root is None:
@@ -183,6 +214,15 @@ class FeeTableStreamReducer:
         missing = [field_id for field_id in normalized_field_ids if field_id not in root_field_ids]
         if missing:
             raise ValueError(f"category_leaf references unknown root column field_id: {missing}")
+        return normalized_field_ids
+
+    def _validated_summary_field_ids(self, field_id: str | list[str]) -> list[str]:
+        field_ids = [field_id] if isinstance(field_id, str) else field_id
+        root_field_ids = {column.field_id for column in self._root_columns}
+        normalized_field_ids = list(dict.fromkeys(field_ids))
+        missing = [item for item in normalized_field_ids if item not in root_field_ids]
+        if missing:
+            raise ValueError(f"summary_detected references unknown root column field_id: {missing}")
         return normalized_field_ids
 
     def finalize_section(self) -> FeeTableLogicArea:

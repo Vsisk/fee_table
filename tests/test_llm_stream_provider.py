@@ -13,6 +13,10 @@ def test_llm_provider_streams_validated_column_events():
     asyncio.run(_assert_llm_provider_streams_validated_column_events())
 
 
+def test_llm_provider_streams_validated_category_summary_events():
+    asyncio.run(_assert_llm_provider_streams_validated_category_summary_events())
+
+
 async def _assert_llm_provider_streams_validated_column_events():
     client = FakeStreamingClient(
         [
@@ -48,6 +52,48 @@ async def _assert_llm_provider_streams_validated_column_events():
     assert client.calls[0]["query"] == ""
 
 
+async def _assert_llm_provider_streams_validated_category_summary_events():
+    field_id = "amount_id"
+    client = FakeStreamingClient(
+        [
+            {
+                "event_type": "category_leaf",
+                "payload": {
+                    "fee_category_name": "Usage",
+                    "category_type": "charge",
+                    "field_ids": [field_id],
+                },
+            },
+            {
+                "event_type": "summary_detected",
+                "payload": {
+                    "summary_title": "Usage Total",
+                    "summary_type": "sum",
+                    "field_id": [field_id],
+                },
+            },
+        ]
+    )
+    provider = LLMFeeTableEventProvider(client=client)
+
+    events = [
+        event
+        async for event in await provider.categories(
+            FeeTableSourceView(content_type="excel_md", text_input="table"),
+            json.dumps([{"field_id": field_id, "column_key": "amount"}]),
+        )
+    ]
+
+    assert [event.event_type for event in events] == [
+        FeeTableEventType.CATEGORY_LEAF,
+        FeeTableEventType.SUMMARY_DETECTED,
+    ]
+    assert client.calls[0]["prompt_template"] == ["fee_table_categories"]
+    assert client.calls[0]["column_pool_json"] == json.dumps(
+        [{"field_id": field_id, "column_key": "amount"}]
+    )
+
+
 def test_scheduler_consumes_provider_event_streams():
     asyncio.run(_assert_scheduler_consumes_provider_event_streams())
 
@@ -76,8 +122,12 @@ def test_default_prompt_catalog_contains_fee_table_stream_templates():
     assert "specific_extraction_rules" in root_columns_prompt
     assert "table_md" in root_columns_prompt
     assert "query" in root_columns_prompt
-    assert "Allowed events: category_open, category_leaf, category_close" in categories_prompt
-    assert "严禁输出 path" in categories_prompt
+    assert "category_open" in categories_prompt
+    assert "category_leaf" in categories_prompt
+    assert "category_close" in categories_prompt
+    assert "summary_detected" in categories_prompt
+    assert "summary_type" in categories_prompt
+    assert "Do not output path" in categories_prompt
 
 
 class FakeStreamingClient:
