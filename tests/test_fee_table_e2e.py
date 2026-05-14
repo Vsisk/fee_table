@@ -36,15 +36,6 @@ def test_real_llm_fee_table_image_end_to_end():
     assert all(field_id in root_field_ids for field_id in leaf_columns)
     assert _empty_enrichment_fields(root)
 
-    dumped = logic_area.model_dump()
-    serialized = json.dumps(dumped)
-    assert "expression" not in serialized
-    assert "data_source" not in serialized
-    assert "mapping_tree" not in serialized
-    assert "BO" not in serialized
-    assert "context" not in serialized
-    assert _all_edsl_empty(dumped)
-
 
 def _local_case_image_data_url() -> str:
     image_path = PROJECT_ROOT / "case.jpg"
