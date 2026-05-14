@@ -35,11 +35,9 @@ class ReducerApplyResult:
 class FeeTableStreamReducer:
     def __init__(
         self,
-        source_view: FeeTableSourceView | None = None,
-        id_generator: FeeTableIdGenerator | None = None,
+        source_view: FeeTableSourceView | None = None
     ) -> None:
         self.source_view = source_view
-        self.id_generator = id_generator or FeeTableIdGenerator()
         self.root = None
         self._root_columns: list[ColumnTerm] = []
         self._path_to_category: dict[tuple[str, ...], FeeCategoryTerm] = {}
@@ -100,7 +98,7 @@ class FeeTableStreamReducer:
                 "field_id": column.field_id,
                 "column_key": column.column_key,
                 "pdf_example": column.pdf_example,
-                "pdf_field_name": column.pdf_field_name,
+                "pdf_key": column.pdf_field_name,
             }
             for column in self._root_columns
         ]
@@ -131,18 +129,17 @@ class FeeTableStreamReducer:
     def _apply_raw_column_detected(self, event: RawFeeTableEvent) -> None:
         if self._columns_finalized:
             return
-        column_key = event.payload["column_key"]
-        pdf_field_name = event.payload["pdf_field_name"]
-        signature = (column_key, pdf_field_name)
+        column_key = event.payload["cbs_key"]
+        pdf_key = event.payload["pdf_key"]
+        signature = (column_key, pdf_key)
         if signature in self._column_signature_to_field_id:
             return
 
-        final_key = self._next_column_key(column_key, pdf_field_name)
+        final_key = self._next_column_key(column_key, pdf_key)
         column = ColumnTerm(
-            field_id=self.id_generator.new_id(),
             column_key=final_key,
-            pdf_example=event.payload["pdf_example"],
-            pdf_field_name=pdf_field_name,
+            pdf_example=event.payload["pdf_exp"],
+            pdf_field_name=pdf_key,
         )
         self._root_columns.append(column)
         self._root_columns.sort(key=lambda item: item.field_id)
@@ -150,7 +147,7 @@ class FeeTableStreamReducer:
             self.root.columns_definition = self._columns_definition()
         self._column_signature_to_field_id[signature] = column.field_id
 
-    def _next_column_key(self, column_key: str, pdf_field_name: str) -> str:
+    def _next_column_key(self, column_key: str, pdf_key: str) -> str:
         existing = self._column_keys_by_original.setdefault(column_key, set())
         if not existing:
             existing.add(column_key)
@@ -172,13 +169,13 @@ class FeeTableStreamReducer:
         self._ensure_parent_paths(path)
         parent = self._parent_for_path(path)
         seq = len(parent.children) + 1
-        pdf_name = event.payload.get("pdf_field_name", "")
+        pdf_name = event.payload.get("pdf_key", "")
         category = FeeCategoryTerm(
             fee_category_type=event.payload["fee_category_type"],
             seq=seq,
             fee_category_info=FeeCategoryInfo(
                 fee_category_name=event.payload["fee_category_name"],
-                pdf_field_name=pdf_name,
+                pdf_key=pdf_name,
                 category_type=event.payload.get("category_type"),
                 is_display_name=True if pdf_name else False,
             ),
@@ -195,13 +192,13 @@ class FeeTableStreamReducer:
         path: tuple[str, ...],
     ) -> ReducerApplyResult:
         if event.payload["fee_category_type"] == "leaf":
-            pdf_name = event.payload.get("pdf_field_name", "")
+            pdf_name = event.payload.get("pdf_key", "")
             self.root = FeeCategoryTerm(
                 fee_category_type="leaf",
                 seq=0,
                 fee_category_info=FeeCategoryInfo(
                     fee_category_name=event.payload["fee_category_name"],
-                    pdf_field_name=pdf_name,
+                    pdf_key=pdf_name,
                     category_type=event.payload.get("category_type"),
                     is_display_name=True if pdf_name else False,
                 ),
@@ -217,7 +214,7 @@ class FeeTableStreamReducer:
             seq=0,
             fee_category_info=FeeCategoryInfo(
                 fee_category_name="fee_table_root",
-                pdf_field_name="",
+                pdf_key="",
                 is_display_name=False,
             ),
             columns_definition=self._columns_definition(),
@@ -228,8 +225,8 @@ class FeeTableStreamReducer:
         return [
             ColumnsDefinition(
                 field_id=column.field_id,
-                field_name=column.column_key,
-                cbs_name=column.pdf_field_name,
+                field_name=column.pdf_field_name,
+                cbs_name=column.column_key,
                 is_sum=column.is_sum,
             )
             for column in self._root_columns
@@ -247,7 +244,7 @@ class FeeTableStreamReducer:
                 seq=len(parent.children) + 1,
                 fee_category_info=FeeCategoryInfo(
                     fee_category_name=parent_path[-1],
-                    pdf_field_name=parent_path[-1],
+                    pdf_key=parent_path[-1],
                     is_display_name=True,
                 ),
             )

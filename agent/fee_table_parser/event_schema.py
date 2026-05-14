@@ -28,10 +28,10 @@ PROMPT_ALLOWED_EVENT_TYPES: dict[str, set[FeeTableEventType]] = {
 class RawColumnDetectedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    column_key: str
-    pdf_example: str
-    pdf_field_name: str
-    is_sum: bool
+    cbs_key: str
+    pdf_exp: str
+    pdf_key: str
+    is_sum: bool = False
 
 
 class RawColumnsFinalizedPayload(BaseModel):

@@ -71,7 +71,7 @@ class MockLogicDataNode(BaseModel):
 class ColumnTerm(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    field_id: str
+    field_id: str  = Field(default_factory=lambda: generate_id())
     column_key: str
     pdf_example: str
     pdf_field_name: str = ""

@@ -17,9 +17,26 @@ from agent.llm.exceptions import (
     LLMJsonDecodeError,
     LLMRequestError,
 )
+from agent.llm.config import load_openai_settings
 from agent.llm.jsonl_parser import IncrementalJsonlParser
 from agent.llm.prompt_manager import PromptManager
 from agent.llm.types import LLMFinalResponse, StreamJsonlObject
+
+
+def _client_kwargs(
+    *,
+    api_key: str | None,
+    base_url: str | None,
+    timeout: float | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return kwargs
 
 
 class OpenAILLMClient:
@@ -45,21 +62,35 @@ class OpenAILLMClient:
         client: AsyncOpenAI | None = None,
         prompt_manager: PromptManager | None = None,
         prompt_file: str | Path | None = None,
-        default_model: str = "gpt-4.1",
+        env_path: str | Path | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        default_model: str | None = None,
         default_lang: str = "zh",
         default_temperature: float = 0,
+        timeout: float | None = None,
     ) -> None:
         if client is None and not _OPENAI_SDK_AVAILABLE:
             raise ModuleNotFoundError(
                 "openai package is required to instantiate OpenAILLMClient. "
                 "Install it with `pip install openai`."
             )
-        self._client = client or AsyncOpenAI()
+        settings = load_openai_settings(env_path)
+        resolved_api_key = api_key if api_key is not None else settings.api_key
+        resolved_base_url = base_url if base_url is not None else settings.base_url
+        resolved_timeout = timeout if timeout is not None else settings.timeout_seconds
+        self._client = client or AsyncOpenAI(
+            **_client_kwargs(
+                api_key=resolved_api_key,
+                base_url=resolved_base_url,
+                timeout=resolved_timeout,
+            )
+        )
         self._prompt_manager = prompt_manager or PromptManager(
             prompt_file=prompt_file,
             default_lang=default_lang,
         )
-        self._default_model = default_model
+        self._default_model = default_model or settings.base_model
         self._default_lang = default_lang
         self._default_temperature = default_temperature
 
