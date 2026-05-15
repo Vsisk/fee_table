@@ -31,6 +31,12 @@ class FeeTableEventType(StrEnum):
     SUMMARY_DETECTED = "summary_detected"
     COLUMN_DETECTED = "column_detected"
     COLUMNS_FINALIZED = "columns_finalized"
+    COLUMN_INFO_DETECTED = "column_info_detected"
+    FEE_CATEGORY_INFO_DETECTED = "fee_category_info_detected"
+    SUMMARY_FIELD_DETECTED = "summary_field_detected"
+    SUMMARY_INFO_DETECTED = "summary_info_detected"
+    LOOP_INFO_DETECTED = "loop_info_detected"
+    SORT_RULE_DETECTED = "sort_rule_detected"
 
 
 class FeeTableParseInput(BaseModel):
@@ -112,14 +118,14 @@ class SummaryField(BaseModel):
 
 class SummaryInfo(BaseModel):
     summary_title: str
-    edsl_semi_struct: EdslSemiStructTerm = Field(default_factory=EdslSemiStructTerm)
+    edsl_semi_struct: str = ""
     summary_fields: list[SummaryField] = Field(default_factory=list)
     is_display_title: bool = True
 
 
 class ChildrenSortRule(BaseModel):
     is_sort: bool
-    edsl_semi_struct: EdslSemiStructTerm = Field(default_factory=EdslSemiStructTerm)
+    edsl_semi_struct: str = ""
 
 
 class ColumnsDefinition(BaseModel):
@@ -127,6 +133,7 @@ class ColumnsDefinition(BaseModel):
     field_name: str
     cbs_name: str = ""
     is_sum: bool = False
+    edsl_semi_struct: str = ""
 
 
 class Column(BaseModel):

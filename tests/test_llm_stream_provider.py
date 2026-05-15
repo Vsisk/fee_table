@@ -109,6 +109,12 @@ async def _assert_scheduler_consumes_provider_event_streams():
     root = logic_area.fee_table.fee_category_tree
     assert root.fee_category_type == "leaf"
     assert root.columns == [root.columns_definition[0].field_id]
+    assert root.columns_definition[0].edsl_semi_struct == "mock_edsl:column_info_detected:amount"
+    assert root.fee_category_info.edsl_semi_struct == (
+        "mock_edsl:fee_category_info_detected:Usage"
+    )
+    assert root.loop_info.edsl_semi_struct == "mock_edsl:loop_info_detected:Usage"
+    assert root.children_sort_rule.edsl_semi_struct == "mock_edsl:sort_rule_detected:Usage"
 
 
 def test_default_prompt_catalog_contains_fee_table_stream_templates():

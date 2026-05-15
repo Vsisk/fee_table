@@ -11,12 +11,14 @@ from agent.fee_table_parser.models import (
     ColumnTerm,
     ColumnsDefinition,
     CrossRelation,
+    ChildrenSortRule,
     FeeCategoryInfo,
     FeeCategoryTerm,
     FeeTable,
     FeeTableEventType,
     FeeTableLogicArea,
     FeeTableSourceView,
+    LoopInfo,
     SummaryField,
     SummaryInfo,
 )
@@ -63,7 +65,10 @@ class FeeTableStreamReducer:
 
     def consume_raw_event(self, event: RawFeeTableEvent) -> ReducerApplyResult:
         if event.event_type == FeeTableEventType.COLUMN_DETECTED:
-            self._apply_raw_column_detected(event)
+            column = self._apply_raw_column_detected(event)
+            if column is None:
+                return ReducerApplyResult()
+            self._apply_column_info_edsl(column)
             return ReducerApplyResult()
         if event.event_type == FeeTableEventType.COLUMNS_FINALIZED:
             self._columns_finalized = True
@@ -75,8 +80,7 @@ class FeeTableStreamReducer:
         if event.event_type == FeeTableEventType.CATEGORY_CLOSE:
             return self._apply_raw_category_close()
         if event.event_type == FeeTableEventType.SUMMARY_DETECTED:
-            self._apply_raw_summary_detected(event)
-            return ReducerApplyResult()
+            return self._apply_raw_summary_detected(event)
         raise ValueError(f"unsupported raw event_type: {event.event_type}")
 
     def ensure_columns_finalized(self) -> None:
@@ -90,6 +94,7 @@ class FeeTableStreamReducer:
                 "column_key": column.column_key,
                 "pdf_example": column.pdf_example,
                 "pdf_key": column.pdf_field_name,
+                "edsl_semi_struct": column.edsl_semi_struct,
             }
             for column in self._root_columns
         ]
@@ -138,7 +143,10 @@ class FeeTableStreamReducer:
             )
             self.root.closed = True
             self._latest_summary_target = self.root
-            return ReducerApplyResult(closed_category_ids=[self.root.fee_category_id])
+            self._apply_category_edsl(self.root)
+            return ReducerApplyResult(
+                closed_category_ids=[self.root.fee_category_id],
+            )
 
         if self.root.fee_category_type == "leaf":
             raise ValueError("cannot append category events after a leaf root has been created")
@@ -158,16 +166,22 @@ class FeeTableStreamReducer:
         parent.children.append(category)
         category.closed = True
         self._latest_summary_target = category
-        return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
+        self._apply_category_edsl(category)
+        return ReducerApplyResult(
+            closed_category_ids=[category.fee_category_id],
+        )
 
     def _apply_raw_category_close(self) -> ReducerApplyResult:
         if not self._category_stack or len(self._category_stack) == 1:
             raise ValueError("category_close requires an open parent category")
         category = self._category_stack.pop()
         category.closed = True
-        return ReducerApplyResult(closed_category_ids=[category.fee_category_id])
+        self._apply_category_edsl(category)
+        return ReducerApplyResult(
+            closed_category_ids=[category.fee_category_id],
+        )
 
-    def _apply_raw_summary_detected(self, event: RawFeeTableEvent) -> None:
+    def _apply_raw_summary_detected(self, event: RawFeeTableEvent) -> ReducerApplyResult:
         target = self._latest_summary_target
         if target is None:
             raise ValueError("summary_detected requires a preceding category_open or category_leaf")
@@ -177,17 +191,18 @@ class FeeTableStreamReducer:
                 field_id=self._validated_summary_field_ids(field_id),
                 field_name=event.payload["summary_title"],
                 summary_type=event.payload["summary_type"],
-                is_virtual=True if len(field_id) > 1 else False,
+                is_virtual=isinstance(field_id, list) and len(field_id) > 1,
             )
             for field_id in event.payload["field_id"]
         ]
-        target.summary_info.append(
-            SummaryInfo(
-                summary_title=event.payload["summary_title"],
-                summary_fields=summary_fields,
-                is_display_title=True
-            )
+        summary = SummaryInfo(
+            summary_title=event.payload["summary_title"],
+            summary_fields=summary_fields,
+            is_display_title=True,
         )
+        target.summary_info.append(summary)
+        self._apply_summary_edsl(target, summary)
+        return ReducerApplyResult()
 
     def _ensure_stack_root(self) -> None:
         if self.root is None:
@@ -235,14 +250,14 @@ class FeeTableStreamReducer:
             parse_status="finalized",
         )
 
-    def _apply_raw_column_detected(self, event: RawFeeTableEvent) -> None:
+    def _apply_raw_column_detected(self, event: RawFeeTableEvent) -> ColumnTerm | None:
         if self._columns_finalized:
-            return
+            return None
         column_key = event.payload["cbs_key"]
         pdf_key = event.payload["pdf_key"]
         signature = (column_key, pdf_key)
         if signature in self._column_signature_to_field_id:
-            return
+            return None
 
         final_key = self._next_column_key(column_key, pdf_key)
         column = ColumnTerm(
@@ -255,6 +270,117 @@ class FeeTableStreamReducer:
         if self.root is not None:
             self.root.columns_definition = self._columns_definition()
         self._column_signature_to_field_id[signature] = column.field_id
+        return column
+
+    def _apply_column_info_edsl(self, column: ColumnTerm) -> None:
+        payload = {
+            "pdf_name": "",
+            "fee_category_name": "",
+            "pdf_key": column.pdf_field_name,
+            "cbs_key": column.column_key,
+            "pdf_exp": column.pdf_example,
+            "evidence_md": self._evidence_md(),
+        }
+        column.edsl_semi_struct = self._mock_edsl(
+            FeeTableEventType.COLUMN_INFO_DETECTED,
+            payload,
+            column.column_key,
+        )
+
+    def _apply_category_edsl(self, category: FeeCategoryTerm) -> None:
+        payload = {
+            "pdf_name": category.fee_category_info.pdf_field_name,
+            "fee_category_name": category.fee_category_info.fee_category_name,
+            "evidence_md": self._evidence_md(),
+            "category_type": "leaf" if category.fee_category_type == "leaf" else "parent",
+            "context": self._category_context(category),
+        }
+        name = category.fee_category_info.fee_category_name
+        category.fee_category_info.edsl_semi_struct = self._mock_edsl(
+            FeeTableEventType.FEE_CATEGORY_INFO_DETECTED,
+            payload,
+            name,
+        )
+        category.loop_info = LoopInfo(
+            is_loop=False,
+            edsl_semi_struct=self._mock_edsl(
+                FeeTableEventType.LOOP_INFO_DETECTED,
+                payload,
+                name,
+            ),
+        )
+        category.children_sort_rule = ChildrenSortRule(
+            is_sort=False,
+            edsl_semi_struct=self._mock_edsl(
+                FeeTableEventType.SORT_RULE_DETECTED,
+                payload,
+                name,
+            ),
+        )
+
+    def _apply_summary_edsl(self, category: FeeCategoryTerm, summary: SummaryInfo) -> None:
+        field_names = [summary_field.field_name for summary_field in summary.summary_fields]
+        for summary_field in summary.summary_fields:
+            payload = {
+                "pdf_name": category.fee_category_info.pdf_field_name,
+                "fee_category_name": category.fee_category_info.fee_category_name,
+                "evidence_md": self._evidence_md(),
+                "summary_title": summary.summary_title,
+                "summary_type": summary_field.summary_type,
+                "field_info": self._column_context(summary_field.field_id),
+            }
+            summary_field.edsl_semi_struct = self._mock_edsl(
+                FeeTableEventType.SUMMARY_FIELD_DETECTED,
+                payload,
+                summary_field.field_name,
+            )
+        payload = {
+            "pdf_name": category.fee_category_info.pdf_field_name,
+            "fee_category_name": category.fee_category_info.fee_category_name,
+            "evidence_md": self._evidence_md(),
+            "summary_title": summary.summary_title,
+            "field_name": field_names,
+        }
+        summary.edsl_semi_struct = self._mock_edsl(
+            FeeTableEventType.SUMMARY_INFO_DETECTED,
+            payload,
+            summary.summary_title,
+        )
+
+    def _category_context(self, category: FeeCategoryTerm) -> list[dict]:
+        if category.fee_category_type == "leaf":
+            return self._column_context(category.columns or [])
+        return [
+            {
+                "fee_category_name": child.fee_category_info.fee_category_name,
+                "pdf_name": child.fee_category_info.pdf_field_name,
+            }
+            for child in category.children or []
+        ]
+
+    def _column_context(self, field_ids: list[str]) -> list[dict]:
+        by_id = {column.field_id: column for column in self._root_columns}
+        return [
+            {
+                "pdf_key": by_id[field_id].pdf_field_name,
+                "cbs_key": by_id[field_id].column_key,
+            }
+            for field_id in field_ids
+            if field_id in by_id
+        ]
+
+    def _evidence_md(self) -> str:
+        if self.source_view is None:
+            return ""
+        return self.source_view.text_input or self.source_view.visual_input or ""
+
+    def _mock_edsl(
+        self,
+        event_type: FeeTableEventType,
+        payload: dict,
+        target_name: str,
+    ) -> str:
+        return f"mock_edsl:{event_type.value}:{target_name}"
 
     def _next_column_key(self, column_key: str, pdf_key: str) -> str:
         existing = self._column_keys_by_original.setdefault(column_key, set())
@@ -276,6 +402,7 @@ class FeeTableStreamReducer:
                 field_name=column.pdf_field_name,
                 cbs_name=column.column_key,
                 is_sum=column.is_sum,
+                edsl_semi_struct=column.edsl_semi_struct,
             )
             for column in self._root_columns
         ]

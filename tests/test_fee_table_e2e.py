@@ -34,7 +34,7 @@ def test_real_llm_fee_table_image_end_to_end():
     leaf_columns = _leaf_column_refs(root)
     assert leaf_columns
     assert all(field_id in root_field_ids for field_id in leaf_columns)
-    assert _empty_enrichment_fields(root)
+    assert _mock_enrichment_fields_populated(root)
 
 
 def _local_case_image_data_url() -> str:
@@ -54,14 +54,15 @@ def _leaf_column_refs(category) -> list[str]:
     return refs
 
 
-def _empty_enrichment_fields(category) -> bool:
-    if category.summary_info != []:
-        return False
-    if category.loop_info is not None:
-        return False
-    if category.children_sort_rule is not None:
-        return False
-    return all(_empty_enrichment_fields(child) for child in category.children)
+def _mock_enrichment_fields_populated(category) -> bool:
+    if category.fee_category_type != "root":
+        if not category.fee_category_info.edsl_semi_struct:
+            return False
+        if category.loop_info is None or not category.loop_info.edsl_semi_struct:
+            return False
+        if category.children_sort_rule is None or not category.children_sort_rule.edsl_semi_struct:
+            return False
+    return all(_mock_enrichment_fields_populated(child) for child in category.children)
 
 
 def _all_edsl_empty(value):

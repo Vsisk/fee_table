@@ -43,6 +43,28 @@ def test_first_leaf_category_becomes_leaf_root_with_columns_definition():
     assert reducer.root.columns == [field_id]
 
 
+def test_column_detected_fills_column_edsl_semi_struct():
+    reducer = FeeTableStreamReducer()
+
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {
+                    "event_type": "column_detected",
+                    "payload": {
+                        "cbs_key": "amount",
+                        "pdf_exp": "10.00",
+                        "pdf_key": "Amount",
+                    },
+                },
+            ]
+        )
+    )
+
+    column = json.loads(reducer.column_pool_prompt_json())[0]
+    assert column["edsl_semi_struct"] == "mock_edsl:column_info_detected:amount"
+
+
 def test_first_parent_category_creates_root_with_columns_definition():
     reducer = FeeTableStreamReducer()
     reducer.consume_raw_jsonl(
@@ -142,6 +164,88 @@ def test_stack_protocol_nests_leaf_under_current_parent():
     assert parent.children[0].columns == [field_id]
 
 
+def test_leaf_category_fills_category_loop_and_sort_edsl_semi_struct():
+    reducer = FeeTableStreamReducer()
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {
+                    "event_type": "column_detected",
+                    "payload": {
+                        "cbs_key": "amount",
+                        "pdf_exp": "10.00",
+                        "pdf_key": "Amount",
+                    },
+                },
+                {"event_type": "columns_finalized", "payload": {}},
+            ]
+        )
+    )
+    field_id = json.loads(reducer.column_pool_prompt_json())[0]["field_id"]
+
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {
+                    "event_type": "category_leaf",
+                    "payload": {
+                        "fee_category_name": "Usage",
+                        "pdf_key": "Usage",
+                        "category_type": "charge",
+                        "field_ids": [field_id],
+                    },
+                },
+            ]
+        )
+    )
+
+    assert reducer.root.fee_category_info.edsl_semi_struct == (
+        "mock_edsl:fee_category_info_detected:Usage"
+    )
+    assert reducer.root.loop_info.edsl_semi_struct == "mock_edsl:loop_info_detected:Usage"
+    assert reducer.root.children_sort_rule.edsl_semi_struct == (
+        "mock_edsl:sort_rule_detected:Usage"
+    )
+
+
+def test_parent_close_fills_category_loop_and_sort_edsl_semi_struct():
+    reducer = FeeTableStreamReducer()
+    reducer.consume_raw_jsonl(
+        _jsonl(
+            [
+                {"event_type": "columns_finalized", "payload": {}},
+                {
+                    "event_type": "category_open",
+                    "payload": {
+                        "fee_category_name": "Usage group",
+                        "pdf_key": "Usage group",
+                    },
+                },
+                {
+                    "event_type": "category_leaf",
+                    "payload": {
+                        "fee_category_name": "Usage",
+                        "pdf_key": "Usage",
+                        "category_type": "charge",
+                        "field_ids": [],
+                    },
+                },
+            ]
+        )
+    )
+
+    reducer.consume_raw_jsonl(_jsonl([{"event_type": "category_close", "payload": {}}]))
+
+    parent = reducer.root.children[0]
+    assert parent.fee_category_info.edsl_semi_struct == (
+        "mock_edsl:fee_category_info_detected:Usage group"
+    )
+    assert parent.loop_info.edsl_semi_struct == "mock_edsl:loop_info_detected:Usage group"
+    assert parent.children_sort_rule.edsl_semi_struct == (
+        "mock_edsl:sort_rule_detected:Usage group"
+    )
+
+
 def test_summary_detected_after_leaf_attaches_summary_info_to_leaf():
     reducer = FeeTableStreamReducer()
     reducer.consume_raw_jsonl(
@@ -189,6 +293,10 @@ def test_summary_detected_after_leaf_attaches_summary_info_to_leaf():
     assert summary.summary_title == "Usage Total"
     assert summary.summary_fields[0].summary_type == "sum"
     assert summary.summary_fields[0].field_id == [field_id]
+    assert summary.edsl_semi_struct == "mock_edsl:summary_info_detected:Usage Total"
+    assert summary.summary_fields[0].edsl_semi_struct == (
+        "mock_edsl:summary_field_detected:Usage Total"
+    )
 
 
 def test_summary_detected_accepts_grouped_field_ids_for_total_not_in_root_columns():
